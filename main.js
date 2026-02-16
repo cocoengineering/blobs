@@ -35,13 +35,18 @@ const state = {
   },
   reactivityAmount: 60, // 0-100, global intensity multiplier
   // Background
-  bgStyle: "mesh",     // "mesh" | "linear" | "radial"
+  bgStyle: "wavyMesh", // "wavyMesh" | "meshGradient" | "linear" | "radial" | "solid"
   bgColor1: "#7b8cde", // base
   bgColor2: "#a5b4f0", // mid
   bgColor3: "#c8c0e8", // accent
+  bgColor4: "#ffd9a8",
+  bgColor5: "#4a45ff",
   bgAngle: 160,
   bgSpeed: 30,         // 0-100
   bgComplexity: 4,     // 2-8 orbs for mesh
+  bgWaveScale: 55,     // 20-120 mesh softness/spread
+  bgEdge: 55,          // 0-100 directional bias
+  bgDrift: 28,         // 0-100 mesh-gradient flow amount
   bgGrain: 12,         // 0-40
 };
 
@@ -79,6 +84,8 @@ function hexToRgba(hex, alpha) {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+const TAU = Math.PI * 2;
+
 // Blend two hex colors, t in [0,1]
 function lerpColor(hex1, hex2, t) {
   const [r1, g1, b1] = hexToRgb(hex1);
@@ -105,16 +112,189 @@ function generateOrbs(count) {
       freqY: 0.2 + Math.random() * 0.4,
       driftX: 0.04 + Math.random() * 0.08,
       driftY: 0.03 + Math.random() * 0.07,
-      // Which color pool to use (0, 1, or 2 maps to bg colors)
-      colorIdx: i % 3,
+      // Which color pool to use (0-4 maps to bg colors)
+      colorIdx: i % 5,
       // Radius as fraction of canvas diagonal
       radius: 0.25 + Math.random() * 0.25,
       // Individual opacity
       alpha: 0.5 + Math.random() * 0.4,
+      // Directional/shape seeds for mesh variants
+      stretchSeed: Math.random(),
+      tiltSeed: (Math.random() - 0.5) * 1.4,
+      pulseSeed: Math.random() * TAU,
     });
   }
 }
-generateOrbs(state.bgComplexity);
+function getBgPointCount(style = state.bgStyle) {
+  return style === "meshGradient" ? state.bgComplexity + 4 : state.bgComplexity;
+}
+
+generateOrbs(getBgPointCount());
+
+function drawEllipticalOrb(x, y, radius, color, alpha, stretch, angle) {
+  bgCtx.save();
+  bgCtx.translate(x, y);
+  bgCtx.rotate(angle);
+  bgCtx.scale(stretch, 1);
+  const grad = bgCtx.createRadialGradient(0, 0, 0, 0, 0, radius);
+  grad.addColorStop(0, hexToRgba(color, alpha));
+  grad.addColorStop(0.55, hexToRgba(color, alpha * 0.35));
+  grad.addColorStop(1, hexToRgba(color, 0));
+  bgCtx.fillStyle = grad;
+  bgCtx.fillRect(-radius, -radius, radius * 2, radius * 2);
+  bgCtx.restore();
+}
+
+let meshBufferCanvas = null;
+let meshBufferCtx = null;
+let meshBufferImage = null;
+
+function ensureMeshBuffer(w, h) {
+  const base = 72 + state.bgComplexity * 18;
+  const rw = Math.max(72, base);
+  const rh = Math.max(72, Math.round((h / Math.max(1, w)) * base));
+
+  if (!meshBufferCanvas) {
+    meshBufferCanvas = document.createElement("canvas");
+    meshBufferCtx = meshBufferCanvas.getContext("2d", { willReadFrequently: true });
+  }
+  if (meshBufferCanvas.width !== rw || meshBufferCanvas.height !== rh || !meshBufferImage) {
+    meshBufferCanvas.width = rw;
+    meshBufferCanvas.height = rh;
+    meshBufferImage = meshBufferCtx.createImageData(rw, rh);
+  }
+}
+
+function drawWavyMesh({ t, w, h }) {
+  const colors = [state.bgColor1, state.bgColor2, state.bgColor3];
+  const diag = Math.sqrt(w * w + h * h);
+  bgCtx.fillStyle = colors[0];
+  bgCtx.fillRect(0, 0, w, h);
+
+  bgCtx.globalCompositeOperation = "screen";
+  for (const orb of orbs) {
+    const ox = (orb.x + Math.sin(t * orb.freqX + orb.phaseX) * orb.driftX) * w;
+    const oy = (orb.y + Math.cos(t * orb.freqY + orb.phaseY) * orb.driftY) * h;
+    const radius = orb.radius * diag;
+    const color = colors[orb.colorIdx % colors.length];
+
+    const grad = bgCtx.createRadialGradient(ox, oy, 0, ox, oy, radius);
+    grad.addColorStop(0, hexToRgba(color, orb.alpha));
+    grad.addColorStop(0.6, hexToRgba(color, orb.alpha * 0.3));
+    grad.addColorStop(1, hexToRgba(color, 0));
+    bgCtx.fillStyle = grad;
+    bgCtx.fillRect(0, 0, w, h);
+  }
+  bgCtx.globalCompositeOperation = "source-over";
+}
+
+function drawMeshGradient({ t, w, h }) {
+  const colors = [state.bgColor1, state.bgColor2, state.bgColor3, state.bgColor4, state.bgColor5].map(hexToRgb);
+  const angle = state.bgAngle * Math.PI / 180;
+  const softness = state.bgWaveScale / 100;
+  const edge = state.bgEdge / 100;
+  const flow = state.bgDrift / 100;
+  const speed = state.bgSpeed / 100;
+  const flowScale = flow * (0.25 + speed * 0.95);
+
+  ensureMeshBuffer(w, h);
+  const rw = meshBufferCanvas.width;
+  const rh = meshBufferCanvas.height;
+  const data = meshBufferImage.data;
+
+  const sigma = 0.12 + softness * 0.26;
+  const sharp = 0.85 + edge * 2.0;
+  const invSigma2 = 1 / (2 * sigma * sigma);
+  const cosA = Math.cos(angle);
+  const sinA = Math.sin(angle);
+  const curveAmount = 0.01 + flowScale * 0.07 + softness * 0.02;
+
+  const pointCount = Math.max(5, Math.min(orbs.length, state.bgComplexity + 4));
+  const points = [];
+  for (let i = 0; i < pointCount; i++) {
+    const orb = orbs[i];
+    const px = orb.x
+      + Math.sin(t * (0.35 + orb.freqX * 0.45) + orb.phaseX) * orb.driftX * (0.9 + flowScale)
+      + Math.cos(t * 0.21 + orb.pulseSeed) * Math.cos(angle) * flowScale * 0.08;
+    const py = orb.y
+      + Math.cos(t * (0.28 + orb.freqY * 0.4) + orb.phaseY) * orb.driftY * (0.9 + flowScale)
+      + Math.sin(t * 0.18 + orb.pulseSeed) * Math.sin(angle) * flowScale * 0.08;
+    points.push({
+      x: px,
+      y: py,
+      color: colors[orb.colorIdx % colors.length],
+    });
+  }
+
+  let k = 0;
+  for (let y = 0; y < rh; y++) {
+    const ny = y / Math.max(1, rh - 1);
+    for (let x = 0; x < rw; x++) {
+      const nx = x / Math.max(1, rw - 1);
+      // Domain-warp the sampling coordinates to bend otherwise straight separators
+      // into curved, flowing boundaries.
+      const warpX =
+        Math.sin((ny * (2.8 + edge * 2.2) + t * (0.28 + flowScale * 0.5)) * TAU + cosA * 1.7) * curveAmount
+        + Math.sin((nx * (1.6 + softness * 1.6) - t * 0.19) * TAU + 0.7) * curveAmount * 0.6;
+      const warpY =
+        Math.cos((nx * (2.4 + edge * 1.8) - t * (0.24 + flowScale * 0.45)) * TAU + sinA * 1.4) * curveAmount
+        + Math.sin((ny * (1.4 + softness * 1.9) + t * 0.16) * TAU + 1.3) * curveAmount * 0.55;
+      const sx = nx + warpX;
+      const sy = ny + warpY;
+
+      let sumW = 0;
+      let maxW = 0;
+      let r = 0;
+      let g = 0;
+      let b = 0;
+
+      for (const p of points) {
+        const dx = sx - p.x;
+        const dy = sy - p.y;
+        const d2 = dx * dx + dy * dy;
+        const weight = Math.exp(-d2 * invSigma2 * sharp);
+        sumW += weight;
+        if (weight > maxW) maxW = weight;
+        r += p.color[0] * weight;
+        g += p.color[1] * weight;
+        b += p.color[2] * weight;
+      }
+
+      const inv = 1 / Math.max(1e-6, sumW);
+      const dominance = maxW * inv;
+      const relief = (dominance - 0.46) * (0.45 + edge * 1.0);
+      const shade = 1 + relief * 0.35;
+
+      data[k++] = Math.max(0, Math.min(255, Math.round(r * inv * shade)));
+      data[k++] = Math.max(0, Math.min(255, Math.round(g * inv * shade)));
+      data[k++] = Math.max(0, Math.min(255, Math.round(b * inv * shade)));
+      data[k++] = 255;
+    }
+  }
+
+  meshBufferCtx.putImageData(meshBufferImage, 0, 0);
+
+  bgCtx.clearRect(0, 0, w, h);
+  bgCtx.save();
+  bgCtx.imageSmoothingEnabled = true;
+  bgCtx.filter = `blur(${2 + softness * 9}px)`;
+  bgCtx.drawImage(meshBufferCanvas, 0, 0, w, h);
+  bgCtx.restore();
+
+  // Subtle directional light/shadow to suggest depth in the field itself.
+  const light = bgCtx.createLinearGradient(
+    w * (0.5 - Math.cos(angle) * 0.55),
+    h * (0.5 - Math.sin(angle) * 0.55),
+    w * (0.5 + Math.cos(angle) * 0.55),
+    h * (0.5 + Math.sin(angle) * 0.55)
+  );
+  light.addColorStop(0, `rgba(255,255,255,${0.03 + edge * 0.08})`);
+  light.addColorStop(1, `rgba(0,0,0,${0.02 + edge * 0.07})`);
+  bgCtx.globalCompositeOperation = "soft-light";
+  bgCtx.fillStyle = light;
+  bgCtx.fillRect(0, 0, w, h);
+  bgCtx.globalCompositeOperation = "source-over";
+}
 
 function renderBackground(time) {
   const w = bgCanvas.width;
@@ -157,29 +337,15 @@ function renderBackground(time) {
     bgCtx.fillStyle = grad;
     bgCtx.fillRect(0, 0, w, h);
 
+  } else if (state.bgStyle === "wavyMesh") {
+    drawWavyMesh({ t, w, h });
+
+  } else if (state.bgStyle === "meshGradient") {
+    drawMeshGradient({ t, w, h });
+
   } else {
-    // "mesh" - fill base color then overlay drifting radial orbs
-    bgCtx.fillStyle = colors[0];
-    bgCtx.fillRect(0, 0, w, h);
-
-    const diag = Math.sqrt(w * w + h * h);
-
-    for (const orb of orbs) {
-      const ox = (orb.x + Math.sin(t * orb.freqX + orb.phaseX) * orb.driftX) * w;
-      const oy = (orb.y + Math.cos(t * orb.freqY + orb.phaseY) * orb.driftY) * h;
-      const or = orb.radius * diag;
-
-      const color = colors[orb.colorIdx];
-      const grad = bgCtx.createRadialGradient(ox, oy, 0, ox, oy, or);
-      grad.addColorStop(0, hexToRgba(color, orb.alpha));
-      grad.addColorStop(0.6, hexToRgba(color, orb.alpha * 0.3));
-      grad.addColorStop(1, hexToRgba(color, 0));
-
-      bgCtx.globalCompositeOperation = "screen";
-      bgCtx.fillStyle = grad;
-      bgCtx.fillRect(0, 0, w, h);
-      bgCtx.globalCompositeOperation = "source-over";
-    }
+    // Fallback to classic mesh
+    drawWavyMesh({ t, w, h });
   }
 
   // Update grain opacity
@@ -472,16 +638,123 @@ for (const axis of ["xPos", "yPos"]) {
 // Background controls
 wireSlider("bgAngle", "bgAngle", "bgAngleVal", (v) => `${v}\u00B0`);
 wireSlider("bgSpeed", "bgSpeed", "bgSpeedVal", (v) => `${v}%`);
+wireSlider("bgWaveScale", "bgWaveScale", "bgWaveScaleVal", (v) => `${v}%`);
+wireSlider("bgEdge", "bgEdge", "bgEdgeVal", (v) => `${v}%`);
+wireSlider("bgDrift", "bgDrift", "bgDriftVal", (v) => `${v}%`);
 wireSlider("bgGrain", "bgGrain", "bgGrainVal", (v) => `${v}%`);
 
 // Background complexity regenerates orbs
 const bgComplexityInput = document.getElementById("bgComplexity");
 const bgComplexityDisplay = document.getElementById("bgComplexityVal");
 bgComplexityInput.addEventListener("input", () => {
-  state.bgComplexity = parseInt(bgComplexityInput.value);
+  state.bgComplexity = parseInt(bgComplexityInput.value, 10);
   bgComplexityDisplay.textContent = state.bgComplexity;
-  generateOrbs(state.bgComplexity);
+  generateOrbs(getBgPointCount());
 });
+
+function updateBackgroundControlVisibility() {
+  const mode = state.bgStyle;
+  const show = (id, visible) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.toggle("is-hidden", !visible);
+  };
+
+  const modeConfig = {
+    solid: {
+      color2: false,
+      color3: false,
+      color4: false,
+      color5: false,
+      angle: false,
+      speed: false,
+      drift: false,
+      detail: false,
+      waveScale: false,
+      edge: false,
+    },
+    linear: {
+      color2: true,
+      color3: true,
+      color4: false,
+      color5: false,
+      angle: true,
+      speed: true,
+      drift: false,
+      detail: false,
+      waveScale: false,
+      edge: false,
+    },
+    radial: {
+      color2: true,
+      color3: true,
+      color4: false,
+      color5: false,
+      angle: false,
+      speed: true,
+      drift: false,
+      detail: false,
+      waveScale: false,
+      edge: false,
+    },
+    wavyMesh: {
+      color2: true,
+      color3: true,
+      color4: false,
+      color5: false,
+      angle: false,
+      speed: true,
+      drift: false,
+      detail: true,
+      waveScale: false,
+      edge: false,
+    },
+    meshGradient: {
+      color2: true,
+      color3: true,
+      color4: true,
+      color5: true,
+      angle: true,
+      speed: true,
+      drift: true,
+      detail: true,
+      waveScale: true,
+      edge: true,
+    },
+  };
+
+  const config = modeConfig[mode] || modeConfig.wavyMesh;
+  show("bgColorItem2", config.color2);
+  show("bgColorItem3", config.color3);
+  show("bgColorItem4", config.color4);
+  show("bgColorItem5", config.color5);
+  show("bgAngleGroup", config.angle);
+  show("bgSpeedGroup", config.speed);
+  show("bgDriftGroup", config.drift);
+  show("bgDetailGroup", config.detail);
+  show("bgWaveScaleGroup", config.waveScale);
+  show("bgEdgeGroup", config.edge);
+  show("bgGrainGroup", true);
+
+  const detailLabel = document.getElementById("bgDetailLabel");
+  if (detailLabel) {
+    detailLabel.textContent = mode === "meshGradient" ? "Control Points" : "Mesh Complexity";
+  }
+
+  const waveLabel = document.getElementById("bgWaveScaleLabel");
+  if (waveLabel) {
+    waveLabel.textContent = "Softness";
+  }
+
+  const edgeLabel = document.getElementById("bgEdgeLabel");
+  if (edgeLabel) {
+    edgeLabel.textContent = "Edge Definition";
+  }
+  const driftLabel = document.getElementById("bgDriftLabel");
+  if (driftLabel) {
+    driftLabel.textContent = "Flow";
+  }
+}
 
 // Blob color pickers
 document.getElementById("color1").addEventListener("input", (e) => {
@@ -507,6 +780,12 @@ document.getElementById("bgColor2").addEventListener("input", (e) => {
 document.getElementById("bgColor3").addEventListener("input", (e) => {
   state.bgColor3 = e.target.value;
 });
+document.getElementById("bgColor4").addEventListener("input", (e) => {
+  state.bgColor4 = e.target.value;
+});
+document.getElementById("bgColor5").addEventListener("input", (e) => {
+  state.bgColor5 = e.target.value;
+});
 
 // Selects
 document.getElementById("timingFunction").addEventListener("change", (e) => {
@@ -517,6 +796,10 @@ document.getElementById("blendMode").addEventListener("change", (e) => {
 });
 document.getElementById("bgStyle").addEventListener("change", (e) => {
   state.bgStyle = e.target.value;
+  if (state.bgStyle === "wavyMesh" || state.bgStyle === "meshGradient") {
+    generateOrbs(getBgPointCount(state.bgStyle));
+  }
+  updateBackgroundControlVisibility();
 });
 
 // Audio controls
@@ -584,6 +867,7 @@ document.getElementById("btnRandomize").addEventListener("click", () => {
 });
 
 // ─── Init ────────────────────────────────────────────────────────────
+updateBackgroundControlVisibility();
 updateGlow();
 startLoop();
 requestAnimationFrame(frame);

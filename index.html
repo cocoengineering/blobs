@@ -93,6 +93,10 @@
       gap: 0.3rem;
     }
 
+    .is-hidden {
+      display: none !important;
+    }
+
     .control-label {
       display: flex;
       justify-content: space-between;
@@ -145,6 +149,11 @@
       display: flex;
       gap: 0.75rem;
       align-items: center;
+    }
+
+    #bgColorRowBase {
+      flex-wrap: wrap;
+      row-gap: 0.55rem;
     }
 
     .color-item {
@@ -320,10 +329,6 @@
       display: flex;
       align-items: center;
       justify-content: center;
-    }
-
-    .phone-blob-container canvas {
-      /* The canvas is positioned center */
     }
 
     /* Glow behind the blob inside the phone */
@@ -508,48 +513,78 @@
         <div class="control-group">
           <div class="control-label"><span>Style</span></div>
           <select id="bgStyle">
-            <option value="mesh" selected>Wavy Mesh</option>
+            <option value="wavyMesh" selected>Wavy Mesh</option>
+            <option value="meshGradient">Mesh Gradient</option>
             <option value="linear">Linear Gradient</option>
             <option value="radial">Radial Gradient</option>
             <option value="solid">Solid Color</option>
           </select>
         </div>
-        <div class="color-row">
+        <div class="color-row" id="bgColorRowBase">
           <div class="color-item">
             <label>Base</label>
             <input type="color" id="bgColor1" value="#7b8cde" />
           </div>
-          <div class="color-item">
+          <div class="color-item" id="bgColorItem2">
             <label>Mid</label>
             <input type="color" id="bgColor2" value="#a5b4f0" />
           </div>
-          <div class="color-item">
+          <div class="color-item" id="bgColorItem3">
             <label>Accent</label>
             <input type="color" id="bgColor3" value="#c8c0e8" />
           </div>
+          <div class="color-item" id="bgColorItem4">
+            <label>Color 4</label>
+            <input type="color" id="bgColor4" value="#ffd9a8" />
+          </div>
+          <div class="color-item" id="bgColorItem5">
+            <label>Color 5</label>
+            <input type="color" id="bgColor5" value="#4a45ff" />
+          </div>
         </div>
-        <div class="control-group">
+        <div class="control-group" id="bgAngleGroup">
           <div class="control-label">
             <span>Angle</span>
             <span class="control-value" id="bgAngleVal">160&deg;</span>
           </div>
           <input type="range" id="bgAngle" min="0" max="360" value="160" step="1" />
         </div>
-        <div class="control-group">
+        <div class="control-group" id="bgSpeedGroup">
           <div class="control-label">
             <span>Animation Speed</span>
             <span class="control-value" id="bgSpeedVal">30%</span>
           </div>
           <input type="range" id="bgSpeed" min="0" max="100" value="30" step="1" />
         </div>
-        <div class="control-group">
+        <div class="control-group" id="bgDriftGroup">
           <div class="control-label">
-            <span>Mesh Complexity</span>
+            <span id="bgDriftLabel">Flow</span>
+            <span class="control-value" id="bgDriftVal">28%</span>
+          </div>
+          <input type="range" id="bgDrift" min="0" max="100" value="28" step="1" />
+        </div>
+        <div class="control-group" id="bgDetailGroup">
+          <div class="control-label">
+            <span id="bgDetailLabel">Mesh Complexity</span>
             <span class="control-value" id="bgComplexityVal">4</span>
           </div>
           <input type="range" id="bgComplexity" min="2" max="8" value="4" step="1" />
         </div>
-        <div class="control-group">
+        <div class="control-group" id="bgWaveScaleGroup">
+          <div class="control-label">
+            <span id="bgWaveScaleLabel">Softness</span>
+            <span class="control-value" id="bgWaveScaleVal">55%</span>
+          </div>
+          <input type="range" id="bgWaveScale" min="20" max="120" value="55" step="1" />
+        </div>
+        <div class="control-group" id="bgEdgeGroup">
+          <div class="control-label">
+            <span id="bgEdgeLabel">Directional Bias</span>
+            <span class="control-value" id="bgEdgeVal">55%</span>
+          </div>
+          <input type="range" id="bgEdge" min="0" max="100" value="55" step="1" />
+        </div>
+        <div class="control-group" id="bgGrainGroup">
           <div class="control-label">
             <span>Grain</span>
             <span class="control-value" id="bgGrainVal">12%</span>
