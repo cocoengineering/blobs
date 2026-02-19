@@ -196,6 +196,17 @@
 
     select option { background: #1a1a2e; }
 
+    input[type="number"] {
+      width: 100%;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 8px;
+      color: #fff;
+      padding: 0.45rem 0.55rem;
+      font-size: 0.75rem;
+      outline: none;
+    }
+
     /* Buttons */
     .btn-row {
       display: flex;
@@ -410,6 +421,15 @@
             <span class="control-value" id="randomnessVal">8</span>
           </div>
           <input type="range" id="randomness" min="1" max="30" value="8" step="1" />
+        </div>
+        <div class="control-group">
+          <div class="control-label">
+            <span>Random Seed</span>
+          </div>
+          <input type="number" id="randomSeed" min="0" max="4294967295" step="1" value="12345" />
+        </div>
+        <div class="btn-row">
+          <button class="btn" id="btnReseedOrbs">Reroll Seed +1</button>
         </div>
         <div class="control-group">
           <div class="control-label">

@@ -6,6 +6,7 @@ const state = {
   extraPoints: 5,
   randomness: 8,
   size: 250,
+  randomSeed: 12345,
   // Blob animation
   duration: 2000,
   timingFunction: "ease",
@@ -49,6 +50,153 @@ const state = {
   bgDrift: 28,         // 0-100 mesh-gradient flow amount
   bgGrain: 12,         // 0-40
 };
+
+const defaultState = structuredClone(state);
+const URL_PARAM_STATE = "s";
+const URL_SYNC_DEBOUNCE_MS = 120;
+const URL_EXCLUDED_KEYS = new Set(["energy"]);
+let urlSyncTimer = null;
+
+function normalizeSeed(seed) {
+  const n = Number(seed);
+  if (!Number.isFinite(n)) return 0;
+  return (Math.trunc(n) >>> 0);
+}
+
+function mulberry32(seed) {
+  let t = seed >>> 0;
+  return () => {
+    t += 0x6d2b79f5;
+    let r = Math.imul(t ^ (t >>> 15), t | 1);
+    r ^= r + Math.imul(r ^ (r >>> 7), r | 61);
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function createSeededRng(tag) {
+  const seed = normalizeSeed(state.randomSeed) ^ (tag >>> 0);
+  return mulberry32(seed);
+}
+
+let blobSeedRng = createSeededRng(0x9e3779b9);
+function reseedBlobRng() {
+  blobSeedRng = createSeededRng(0x9e3779b9);
+}
+
+function stableStateSnapshot() {
+  return {
+    ...state,
+    reactivity: { ...state.reactivity },
+  };
+}
+
+function serializableState() {
+  const snapshot = stableStateSnapshot();
+  for (const key of URL_EXCLUDED_KEYS) {
+    delete snapshot[key];
+  }
+  return snapshot;
+}
+
+function encodeStateToBase64Url(value) {
+  const json = JSON.stringify(value);
+  const bytes = new TextEncoder().encode(json);
+  let binary = "";
+  bytes.forEach((b) => {
+    binary += String.fromCharCode(b);
+  });
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function decodeStateFromBase64Url(value) {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padLength = (4 - (normalized.length % 4)) % 4;
+  const padded = normalized + "=".repeat(padLength);
+  const binary = atob(padded);
+  const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+  const json = new TextDecoder().decode(bytes);
+  return JSON.parse(json);
+}
+
+function coerceValue(value, template) {
+  if (typeof template === "number") {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : template;
+  }
+  if (typeof template === "boolean") {
+    return Boolean(value);
+  }
+  if (typeof template === "string") {
+    return typeof value === "string" ? value : template;
+  }
+  return value;
+}
+
+function normalizeLoadedState(candidate) {
+  if (!candidate || typeof candidate !== "object") {
+    return null;
+  }
+
+  const next = stableStateSnapshot();
+  for (const [key, templateValue] of Object.entries(defaultState)) {
+    if (key === "energy") continue;
+    if (key === "reactivity") continue;
+    if (candidate[key] !== undefined) {
+      next[key] = coerceValue(candidate[key], templateValue);
+    }
+  }
+
+  if (candidate.reactivity && typeof candidate.reactivity === "object") {
+    for (const [channel, defaultValue] of Object.entries(defaultState.reactivity)) {
+      if (candidate.reactivity[channel] !== undefined) {
+        next.reactivity[channel] = coerceValue(candidate.reactivity[channel], defaultValue);
+      }
+    }
+  }
+
+  next.randomSeed = normalizeSeed(next.randomSeed);
+  return next;
+}
+
+function applyStatePatch(patch) {
+  Object.assign(state, patch);
+  if (patch.reactivity) {
+    Object.assign(state.reactivity, patch.reactivity);
+  }
+}
+
+function updateUrlFromState() {
+  const params = new URLSearchParams(window.location.search);
+  const encoded = encodeStateToBase64Url(serializableState());
+  params.set(URL_PARAM_STATE, encoded);
+  const query = params.toString();
+  const nextUrl = `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`;
+  window.history.replaceState({}, "", nextUrl);
+}
+
+function scheduleUrlSync() {
+  if (urlSyncTimer) clearTimeout(urlSyncTimer);
+  urlSyncTimer = setTimeout(() => {
+    urlSyncTimer = null;
+    updateUrlFromState();
+  }, URL_SYNC_DEBOUNCE_MS);
+}
+
+function loadStateFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const raw = params.get(URL_PARAM_STATE);
+  if (!raw) return false;
+  try {
+    const parsed = decodeStateFromBase64Url(raw);
+    const normalized = normalizeLoadedState(parsed);
+    if (!normalized) return false;
+    applyStatePatch(normalized);
+    return true;
+  } catch (error) {
+    console.warn("Unable to restore state from URL", error);
+    return false;
+  }
+}
 
 // ─── DOM refs ────────────────────────────────────────────────────────
 const blobCanvas = document.getElementById("blobCanvas");
@@ -99,29 +247,30 @@ function lerpColor(hex1, hex2, t) {
 // Seeded orb positions (regenerated when complexity changes)
 let orbs = [];
 function generateOrbs(count) {
+  const rand = createSeededRng(0x243f6a88 ^ (count >>> 0));
   orbs = [];
   for (let i = 0; i < count; i++) {
     orbs.push({
       // Normalized center position [0-1]
-      x: 0.15 + Math.random() * 0.7,
-      y: 0.1 + Math.random() * 0.8,
+      x: 0.15 + rand() * 0.7,
+      y: 0.1 + rand() * 0.8,
       // Drift parameters (radians/sec)
-      phaseX: Math.random() * Math.PI * 2,
-      phaseY: Math.random() * Math.PI * 2,
-      freqX: 0.3 + Math.random() * 0.5,
-      freqY: 0.2 + Math.random() * 0.4,
-      driftX: 0.04 + Math.random() * 0.08,
-      driftY: 0.03 + Math.random() * 0.07,
+      phaseX: rand() * Math.PI * 2,
+      phaseY: rand() * Math.PI * 2,
+      freqX: 0.3 + rand() * 0.5,
+      freqY: 0.2 + rand() * 0.4,
+      driftX: 0.04 + rand() * 0.08,
+      driftY: 0.03 + rand() * 0.07,
       // Which color pool to use (0-4 maps to bg colors)
       colorIdx: i % 5,
       // Radius as fraction of canvas diagonal
-      radius: 0.25 + Math.random() * 0.25,
+      radius: 0.25 + rand() * 0.25,
       // Individual opacity
-      alpha: 0.5 + Math.random() * 0.4,
+      alpha: 0.5 + rand() * 0.4,
       // Directional/shape seeds for mesh variants
-      stretchSeed: Math.random(),
-      tiltSeed: (Math.random() - 0.5) * 1.4,
-      pulseSeed: Math.random() * TAU,
+      stretchSeed: rand(),
+      tiltSeed: (rand() - 0.5) * 1.4,
+      pulseSeed: rand() * TAU,
     });
   }
 }
@@ -129,6 +278,8 @@ function getBgPointCount(style = state.bgStyle) {
   return style === "meshGradient" ? state.bgComplexity + 4 : state.bgComplexity;
 }
 
+loadStateFromUrl();
+reseedBlobRng();
 generateOrbs(getBgPointCount());
 
 function drawEllipticalOrb(x, y, radius, color, alpha, stretch, angle) {
@@ -363,7 +514,7 @@ function scaledEnergy() {
 function blobOptions() {
   const e = state.reactivity.morphSpeed ? scaledEnergy() : 0;
   return {
-    seed: Math.random(),
+    seed: blobSeedRng(),
     extraPoints: Math.round(state.extraPoints + e * 4),
     randomness: Math.round(state.randomness + e * 12),
     size: state.size,
@@ -601,7 +752,7 @@ function frame(time) {
 }
 
 // ─── Controls wiring ─────────────────────────────────────────────────
-function wireSlider(id, stateKey, displayId, formatter) {
+function wireSlider(id, stateKey, displayId, formatter, { persist = true, afterChange } = {}) {
   const input = document.getElementById(id);
   const display = document.getElementById(displayId);
   input.addEventListener("input", () => {
@@ -609,6 +760,8 @@ function wireSlider(id, stateKey, displayId, formatter) {
     state[stateKey] = val;
     if (display) display.textContent = formatter ? formatter(val) : val;
     updateGlow();
+    if (afterChange) afterChange(val);
+    if (persist) scheduleUrlSync();
   });
 }
 
@@ -620,7 +773,7 @@ wireSlider("duration", "duration", "durationVal", (v) => `${(v / 1000).toFixed(2
 wireSlider("opacity", "opacity", "opacityVal", (v) => `${v}%`);
 wireSlider("edgeBlur", "edgeBlur", "blurVal", (v) => `${v}px`);
 wireSlider("glowIntensity", "glowIntensity", "glowVal", (v) => `${v}%`);
-wireSlider("energy", "energy", "energyVal", (v) => v.toFixed(2));
+wireSlider("energy", "energy", "energyVal", (v) => v.toFixed(2), { persist: false });
 
 // Position sliders
 for (const axis of ["xPos", "yPos"]) {
@@ -632,6 +785,7 @@ for (const axis of ["xPos", "yPos"]) {
     state[axis] = parseFloat(input.value);
     display.textContent = `${state[axis]}%`;
     updateBlobPosition();
+    scheduleUrlSync();
   });
 }
 
@@ -650,6 +804,7 @@ bgComplexityInput.addEventListener("input", () => {
   state.bgComplexity = parseInt(bgComplexityInput.value, 10);
   bgComplexityDisplay.textContent = state.bgComplexity;
   generateOrbs(getBgPointCount());
+  scheduleUrlSync();
 });
 
 function updateBackgroundControlVisibility() {
@@ -760,39 +915,49 @@ function updateBackgroundControlVisibility() {
 document.getElementById("color1").addEventListener("input", (e) => {
   state.color1 = e.target.value;
   updateGlow();
+  scheduleUrlSync();
 });
 document.getElementById("color2").addEventListener("input", (e) => {
   state.color2 = e.target.value;
   updateGlow();
+  scheduleUrlSync();
 });
 document.getElementById("color3").addEventListener("input", (e) => {
   state.color3 = e.target.value;
   updateGlow();
+  scheduleUrlSync();
 });
 
 // Background color pickers
 document.getElementById("bgColor1").addEventListener("input", (e) => {
   state.bgColor1 = e.target.value;
+  scheduleUrlSync();
 });
 document.getElementById("bgColor2").addEventListener("input", (e) => {
   state.bgColor2 = e.target.value;
+  scheduleUrlSync();
 });
 document.getElementById("bgColor3").addEventListener("input", (e) => {
   state.bgColor3 = e.target.value;
+  scheduleUrlSync();
 });
 document.getElementById("bgColor4").addEventListener("input", (e) => {
   state.bgColor4 = e.target.value;
+  scheduleUrlSync();
 });
 document.getElementById("bgColor5").addEventListener("input", (e) => {
   state.bgColor5 = e.target.value;
+  scheduleUrlSync();
 });
 
 // Selects
 document.getElementById("timingFunction").addEventListener("change", (e) => {
   state.timingFunction = e.target.value;
+  scheduleUrlSync();
 });
 document.getElementById("blendMode").addEventListener("change", (e) => {
   state.blendMode = e.target.value;
+  scheduleUrlSync();
 });
 document.getElementById("bgStyle").addEventListener("change", (e) => {
   state.bgStyle = e.target.value;
@@ -800,6 +965,7 @@ document.getElementById("bgStyle").addEventListener("change", (e) => {
     generateOrbs(getBgPointCount(state.bgStyle));
   }
   updateBackgroundControlVisibility();
+  scheduleUrlSync();
 });
 
 // Audio controls
@@ -809,6 +975,7 @@ wireSlider("smoothing", "smoothing", "smoothingVal", (v) => v.toFixed(2));
 document.getElementById("audioSource").addEventListener("change", (e) => {
   state.audioSource = e.target.value;
   loadAudioFile(e.target.value);
+  scheduleUrlSync();
 });
 
 btnPlayEl.addEventListener("click", () => {
@@ -831,10 +998,28 @@ document.querySelectorAll(".toggle-chip").forEach((chip) => {
     const channel = chip.dataset.channel;
     state.reactivity[channel] = !state.reactivity[channel];
     chip.classList.toggle("toggle-chip--on", state.reactivity[channel]);
+    scheduleUrlSync();
   });
 });
 
 wireSlider("reactivityAmount", "reactivityAmount", "reactivityAmountVal", (v) => `${v}%`);
+
+const randomSeedInput = document.getElementById("randomSeed");
+const randomSeedBtn = document.getElementById("btnReseedOrbs");
+randomSeedInput.addEventListener("change", () => {
+  state.randomSeed = normalizeSeed(randomSeedInput.value);
+  randomSeedInput.value = String(state.randomSeed);
+  reseedBlobRng();
+  generateOrbs(getBgPointCount());
+  scheduleUrlSync();
+});
+randomSeedBtn.addEventListener("click", () => {
+  state.randomSeed = normalizeSeed(state.randomSeed + 1);
+  randomSeedInput.value = String(state.randomSeed);
+  reseedBlobRng();
+  generateOrbs(getBgPointCount());
+  scheduleUrlSync();
+});
 
 // Manual energy presets
 const btnIdle = document.getElementById("btnIdle");
@@ -866,8 +1051,90 @@ document.getElementById("btnRandomize").addEventListener("click", () => {
   });
 });
 
+function syncControlsFromState() {
+  const setValue = (id, value) => {
+    const el = document.getElementById(id);
+    if (el) el.value = String(value);
+  };
+  const setText = (id, text) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text;
+  };
+
+  // Shape / blob
+  setValue("extraPoints", state.extraPoints);
+  setText("extraPointsVal", String(state.extraPoints));
+  setValue("randomness", state.randomness);
+  setText("randomnessVal", String(state.randomness));
+  setValue("blobSize", state.size);
+  setText("sizeVal", String(state.size));
+  setValue("duration", state.duration);
+  setText("durationVal", `${(state.duration / 1000).toFixed(2)}s`);
+  setValue("opacity", state.opacity);
+  setText("opacityVal", `${state.opacity}%`);
+  setValue("edgeBlur", state.edgeBlur);
+  setText("blurVal", `${state.edgeBlur}px`);
+  setValue("glowIntensity", state.glowIntensity);
+  setText("glowVal", `${state.glowIntensity}%`);
+  setValue("xPos", state.xPos);
+  setText("xPosVal", `${state.xPos}%`);
+  setValue("yPos", state.yPos);
+  setText("yPosVal", `${state.yPos}%`);
+  setValue("timingFunction", state.timingFunction);
+  setValue("blendMode", state.blendMode);
+  setValue("randomSeed", state.randomSeed);
+
+  // Blob colors
+  setValue("color1", state.color1);
+  setValue("color2", state.color2);
+  setValue("color3", state.color3);
+
+  // Background
+  setValue("bgStyle", state.bgStyle);
+  setValue("bgColor1", state.bgColor1);
+  setValue("bgColor2", state.bgColor2);
+  setValue("bgColor3", state.bgColor3);
+  setValue("bgColor4", state.bgColor4);
+  setValue("bgColor5", state.bgColor5);
+  setValue("bgAngle", state.bgAngle);
+  setText("bgAngleVal", `${state.bgAngle}°`);
+  setValue("bgSpeed", state.bgSpeed);
+  setText("bgSpeedVal", `${state.bgSpeed}%`);
+  setValue("bgDrift", state.bgDrift);
+  setText("bgDriftVal", `${state.bgDrift}%`);
+  setValue("bgComplexity", state.bgComplexity);
+  setText("bgComplexityVal", String(state.bgComplexity));
+  setValue("bgWaveScale", state.bgWaveScale);
+  setText("bgWaveScaleVal", `${state.bgWaveScale}%`);
+  setValue("bgEdge", state.bgEdge);
+  setText("bgEdgeVal", `${state.bgEdge}%`);
+  setValue("bgGrain", state.bgGrain);
+  setText("bgGrainVal", `${state.bgGrain}%`);
+
+  // Audio + reactivity
+  setValue("audioSource", state.audioSource);
+  setValue("sensitivity", state.sensitivity);
+  setText("sensitivityVal", `${state.sensitivity.toFixed(1)}x`);
+  setValue("smoothing", state.smoothing);
+  setText("smoothingVal", state.smoothing.toFixed(2));
+  setValue("energy", state.energy);
+  setText("energyVal", state.energy.toFixed(2));
+  setValue("reactivityAmount", state.reactivityAmount);
+  setText("reactivityAmountVal", `${state.reactivityAmount}%`);
+
+  document.querySelectorAll(".toggle-chip").forEach((chip) => {
+    const channel = chip.dataset.channel;
+    chip.classList.toggle("toggle-chip--on", Boolean(state.reactivity[channel]));
+  });
+}
+
 // ─── Init ────────────────────────────────────────────────────────────
+smoothedEnergy = state.energy;
+syncControlsFromState();
+updateBlobPosition();
+loadAudioFile(state.audioSource);
 updateBackgroundControlVisibility();
 updateGlow();
+updateUrlFromState();
 startLoop();
 requestAnimationFrame(frame);
